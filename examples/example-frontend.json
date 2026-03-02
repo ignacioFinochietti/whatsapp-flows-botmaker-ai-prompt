@@ -1,0 +1,83 @@
+{
+    "data_api_version": "3.0",
+    "routing_model": {
+        "MAIN_SCREEN": []
+    },
+    "screens": [
+        {
+            "id": "MAIN_SCREEN",
+            "title": "Welcome",
+            "terminal": true,
+            "data": {
+                "showDynamicMessage": {
+                    "type": "boolean",
+                    "__example__": false
+                },
+                "dynamicMessage": {
+                    "type": "string",
+                    "__example__": "Loading..."
+                },
+                "dynamicOptions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {
+                                "type": "string"
+                            },
+                            "title": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "__example__": []
+                }
+            },
+            "layout": {
+                "type": "SingleColumnLayout",
+                "children": [
+                    {
+                        "type": "Form",
+                        "name": "flow_path",
+                        "children": [
+                            {
+                                "type": "TextHeading",
+                                "text": "Hello! Please select an option:"
+                            },
+                            {
+                                "type": "Dropdown",
+                                "label": "Options",
+                                "name": "userSelection",
+                                "data-source": "${data.dynamicOptions}",
+                                "required": true,
+                                "on-select-action": {
+                                    "name": "data_exchange",
+                                    "payload": {
+                                        "component_action": "fetch_details",
+                                        "selectedId": "${form.userSelection}"
+                                    }
+                                }
+                            },
+                            {
+                                "type": "TextBody",
+                                "text": "${data.dynamicMessage}",
+                                "visible": "${data.showDynamicMessage}"
+                            },
+                            {
+                                "type": "Footer",
+                                "label": "Submit",
+                                "on-click-action": {
+                                    "name": "complete",
+                                    "payload": {
+                                        "finalSelection": "${form.userSelection}"
+                                    }
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+    ],
+    "version": "1.0"
+}
