@@ -18,7 +18,7 @@ This skill prevents all those issues by setting strict `[RULES]` and mapping `[K
 ### Automatic Installation (skills.sh)
 If your AI agent supports the `skills.sh` ecosystem, you can install this skill directly by running:
 ```bash
-npx skills add <YOUR_GITHUB_USERNAME>/whatsapp-flows-botmaker-ai-prompt
+npx skills add ignacioFinochietti/whatsapp-flows-botmaker-ai-prompt
 ```
 *(Make sure to push this repository to GitHub and make it public first!)*
 
@@ -34,3 +34,4 @@ Inside the `/examples` folder, you will find:
 
 ## License
 MIT License
+
