@@ -20,7 +20,6 @@ If your AI agent supports the `skills.sh` ecosystem, you can install this skill 
 ```bash
 npx skills add ignacioFinochietti/whatsapp-flows-botmaker-ai-prompt
 ```
-*(Make sure to push this repository to GitHub and make it public first!)*
 
 ### Manual Usage
 1. Open the file [`/botmaker-whatsapp-flows/SKILL.md`](botmaker-whatsapp-flows/SKILL.md).
@@ -34,4 +33,5 @@ Inside the `/examples` folder, you will find:
 
 ## License
 MIT License
+
 
