@@ -1,34 +1,177 @@
 ---
 name: botmaker-whatsapp-flows
-description: Strict context and architecture rules for building WhatsApp Flows and Botmaker Data Exchange endpoints.
+description: >-
+  Strict architectural rules, UI constraints, and error prevention guidelines for building
+  Meta WhatsApp Flows (Flow JSON) and Botmaker Action Code endpoints (data_exchange). Use when designing
+  flows, writing action code endpoints, fixing 400 Decryption problems, schema validation errors, or DAG routing.
 ---
-# Development Guidelines: WhatsApp Flows & Data Exchange (AI Agent Context)
 
-This document contains strict implementation rules, architectural context, and error prevention guidelines for building WhatsApp Flows and their respective Data Exchange Endpoints within Botmaker.
+# Development Guidelines: WhatsApp Flows & Botmaker Data Exchange
 
-**IMPORTANT FOR THE AGENT**: You MUST strictly adhere to these rules when designing, modifying, or debugging `.json` (Flows) or `.js` (Endpoints) files.
+Strict architecture rules, Meta schema constraints, and error prevention runbooks for designing WhatsApp Flows and writing Botmaker Action Code (`data_exchange`) endpoints.
 
-## 1. UI/UX Rules in JSON (Frontend)
-- **[RULE - Zero Friction]**: NEVER create intermediary screens that only contain descriptive text and a "Continue" button.
-  - *Correct Pattern*: Combine the text description on the same screen where the user must take an action, make a selection, or complete a form.
-- **[RULE - Reactive Visibility]**: Utilize dynamic variables (`${data.yourVariableName}`) in the `visible` and `enabled` properties of components. This allows the backend to dynamically hide/show form elements in real-time based on business logic without artificially navigating to different screens.
+---
 
-## 2. Error Prevention (Flows & Typing)
-- **[KNOWN ERROR]**: The WhatsApp validator throws *"invalid operand format"* or *"Type mismatch"* in conditional routing components (`If` or `Switch`).
-- **[SOLUTION]**: The data types in the evaluation MUST be identical. Meticulously check references: do not compare a direct boolean with a string representation (e.g., `true` vs `"true"`), and be extremely careful when crossing references between screen form state (`${form.inputName}`) and injected backend data (`${data.injectedValue}`).
-- **[KNOWN ERROR - Component Limits]**: Dropdowns or RadioButtons limit the number of items they can render natively depending on WhatsApp's API version.
-- **[SOLUTION]**: Never inject an unfiltered array of 100+ items directly into a `<Dropdown>`. Implement server-side filtering logic or split decisions hierarchically (e.g., "Select Province" -> "Select City").
+## 1. Golden Rules of Meta WhatsApp Flows (Frontend)
 
-## 3. Data Exchange Architecture (.js Endpoints)
-- **[RULE - Routing Pattern]**: The backend script MUST ALWAYS be structured using validations based on the `data.component_action` (or equivalent identifier) variable sent by the JSON flow in its `payload`.
-  - *Conceptual Example*: `if (data.component_action === "update_items_list") { // API Logic; flow.data = {...}; flow.send(); }`
-- **[RULE - State Propagation]**: Because WhatsApp Flows do not natively save past screen states globally for the endpoint to consume at any time, you MUST ALWAYS drag/propagate crucial previous user selections in the `payload` of the `navigate` or `data_exchange` actions towards subsequent interfaces (e.g., `{ "previousSelectionId": "${form.currentSelection}", "action": "NEXT_STEP" }`).
-- **[RULE - Required UI Fallbacks]**: If the endpoint queries an external API or database (e.g., for availability, slots, or items) and it returns empty results, THE AGENT MUST inject fallback variables into `flow.data` to:
-  1. Hide the affected selectors (e.g., `showSelector: false`).
-  2. Display a friendly text message stating the unavailability (e.g., `unavailabilityMessage: "No items available at the moment."`).
-  3. Disable continuation buttons to prevent dead-ends (e.g., `isFooterEnabled: false`).
-- **[RULE - Data Exchange Response]**: Every `component_action` block in the backend MUST conclude by modifying the `flow.data` (and optionally `flow.nextScreen`) and explicitly terminating the request. In Botmaker's architecture, this is done using `flow.send();`. Failure to do this hangs the WhatsApp interface payload.
+### Schema & Versions
+- **Flow JSON Version**: Always use `"version": "6.3"` and `"data_api_version": "3.0"`. Never use deprecated or frozen versions (`1.0`, `2.0`, `3.0`, `3.1`), as Meta's builder rejects them with `"Flow JSON version is not supported"`.
+- **Layout Architecture**: Every screen MUST declare `"type": "SingleColumnLayout"` with a single top-level `"Form"` container holding all interactive children and the footer.
+- **Kebab-Case Enforcement**: All component keys and properties MUST be strictly kebab-case (`on-click-action`, `data-source`, `input-type`, `helper-text`). Using camelCase (`onClickAction`, `dataSource`) triggers schema validation rejection.
+- **Mandatory `__example__`**: Every dynamic field declared in a screen's `data` schema MUST have a valid `__example__`. Omitting examples throws Meta's `"property has no example"` error.
+- **Binding Syntax**:
+  - Dynamic data from endpoint: `${data.property_name}`
+  - Form input value: `${form.input_name}`
 
-## 4. Botmaker Context
-- **[RULE - Context Access]**: To retrieve variables previously saved in the user's WhatsApp session (e.g., tags, queue assignment, or user scope), the endpoint MUST instantiate the native API method `await botmakerAPI.getChat()` and read `dataChat.variables.TARGET_VARIABLE` BEFORE executing critical logic that depends on those data points.
-- **[RULE - User Input Sanitization]**: When the flow offers a generic fallback option (like "Other") that subsequently requests free text input, the terminal JSON output must overwrite the generic ID ("Other") with the specific text response provided by the user to avoid data contamination in the subsequent CRM or database.
+### UX & Screen Flow Architecture
+- **[RULE - Zero Friction]**: NEVER create intermediary screens that only contain informational text and a "Continue" button. Always combine instructional text with actionable inputs/selectors on the same screen.
+- **[RULE - Reactive In-Screen Visibility]**: Prefer dynamic visibility (`visible: "${data.showSection}"` and `enabled: "${data.isEnabled}"`) over creating separate transition screens. The endpoint can show, hide, or enable components on the active screen in real-time via `flow.data`.
+- **[RULE - Expression Type Safety]**: When writing expressions in conditional routing or visibility bindings (`If`/`Switch`), operand data types MUST match identically (e.g., boolean `true` vs `"true"`, number vs string). Type mismatches throw `invalid operand format` or `Type mismatch`.
+
+---
+
+## 2. Routing Model & Navigation Contract (DAG)
+
+Meta enforces a strict **Directed Acyclic Graph (DAG)** with **forward-only routing**:
+
+```json
+"routing_model": {
+  "SCREEN_A": ["SCREEN_B", "SCREEN_C"],
+  "SCREEN_B": ["SCREEN_D"]
+}
+```
+
+### Critical Routing Rules:
+1. **No Backward Routes / No Cycles**:
+   - Meta strictly rejects backward routes that mirror forward routes:
+     `Backward route [B->A] corresponding to forward route [A->B] is not allowed.`
+   - Returning to previous screens is handled **natively by the `<` (Back) arrow** in WhatsApp's top-left app bar. Never declare backward routes or duplicate back buttons in data exchange.
+2. **Terminal Screens**:
+   - Screens with no forward progression (e.g. `CONFIRMATION`, `NO_RESULTS`) MUST declare `"terminal": true`.
+   - Terminal screens MUST NOT be keys in `routing_model` (e.g. if the entire flow has only one terminal screen, `"routing_model": {}`).
+   - Terminal screen footers MUST use `"name": "complete"` (never `data_exchange`).
+3. **Declared Destinations**:
+   - Any `flow.nextScreen` returned by the server MUST be explicitly declared in `routing_model[currentScreen]`. Undeclared targets trigger client-side runtime crashes.
+4. **Explicit Cross-Screen State Propagation**:
+   - WhatsApp Flows do NOT persist previous screen form state globally for the endpoint to inspect at any moment.
+   - Crucial selections or inputs from prior screens MUST be explicitly forwarded inside the `payload` of subsequent `navigate` or `data_exchange` actions (e.g., `{ "previousSelectionId": "${form.currentSelection}", "action": "NEXT_STEP" }`).
+
+---
+
+## 3. Botmaker Action Code Endpoint (`data_exchange`)
+
+### Endpoint URL Structure
+```text
+https://functions.botmaker.com/whatsapp-flows/:businessId/:wabaId/:actionCode
+```
+> [!IMPORTANT]
+> `:wabaId` MUST be the **15–16 digit Meta WhatsApp Business Account ID (WABA ID)**, NEVER the phone number. Placing a phone number causes `Estado 400: Decryption problem` at the Botmaker gateway before your script runs.
+
+### Production Boilerplate
+```javascript
+// Injected globals in Botmaker VM:
+// screen, data, flow, bmconsole, user, result
+
+async function handleFlow() {
+  const currentScreen = typeof screen !== 'undefined' ? screen : null;
+  const currentData = (typeof data !== 'undefined' && data) ? data : {};
+  const action = currentData.action || currentData.component_action || null;
+
+  // 1. Health-check ping (Mandatory for Meta & Botmaker endpoint verification)
+  if (action === 'ping') {
+    flow.data = { status: 'active' };
+    flow.send();
+    return;
+  }
+
+  // 2. Initial Flow Launch / Reset
+  if (!currentScreen || action === 'iniciar' || action === 'INIT') {
+    flow.data = {};
+    flow.nextScreen = 'FIRST_SCREEN';
+    flow.send();
+    return;
+  }
+
+  // 3. Action Transitions
+  if (action === 'fetch_details') {
+    const selectedId = currentData.selectedId;
+    // Query API / Database...
+    flow.data = {
+      showDynamicMessage: true,
+      dynamicMessage: 'Details loaded successfully'
+    };
+    flow.send();
+    return;
+  }
+
+  // Default fallback
+  flow.send();
+}
+
+async function main() {
+  try {
+    await handleFlow();
+  } catch (error) {
+    if (typeof bmconsole !== 'undefined' && bmconsole.log) {
+      bmconsole.log('[Flow Error]: ' + error.message);
+    }
+    if (typeof user !== 'undefined' && user.set) {
+      user.set('error_flow', error.message || 'Unknown error');
+    }
+    if (typeof flow !== 'undefined' && flow.send) {
+      flow.data = {
+        showDynamicMessage: true,
+        dynamicMessage: 'An unexpected error occurred. Please try again.'
+      };
+      flow.send();
+    }
+  } finally {
+    // CRITICAL: Botmaker VM requires result.done() to release the sandbox
+    if (typeof result !== 'undefined' && result && typeof result.done === 'function') {
+      result.done();
+    }
+  }
+}
+
+main();
+```
+
+### Critical Backend Architecture Rules:
+1. **Lifecycle Termination (`flow.send()` + `result.done()`)**:
+   - Every `data_exchange` execution path MUST populate `flow.data` (and optionally `flow.nextScreen`) and call `flow.send()`.
+   - The script execution MUST always trigger `result.done()` inside a `finally` block. Missing `result.done()` causes the Botmaker VM sandbox to hang until timeout.
+2. **Context Access & Latency**:
+   - Use injected globals (`user.get('var')` / `user.set('var', val)`) for zero-latency session variables.
+   - Avoid heavy external REST calls like `botmakerAPI.getChat()` unless strictly required, as extra round-trips risk breaching WhatsApp's strict 2500ms latency SLA.
+3. **Graceful UI Fallbacks**:
+   - If an external API or database returns empty results, inject explicit fallback flags into `flow.data` (e.g. `showSelector: false`, `emptyMessage: "No items available"`, empty array `[]`) or navigate to a declared terminal screen (`NO_RESULTS`). Never leave selectors unpopulated without fallback handling.
+4. **Input Sanitization ("Other" / Free Text)**:
+   - When offering a fallback selection (like `"OTHER"`) followed by a free-text input (`TextInput`), overwrite the generic ID with the user's sanitized text response before persisting to CRM or session variables.
+
+---
+
+## 4. Component Patterns & Hard Limits
+
+| Element | Max Limit | Consequence of Breach | Best Practice |
+| :--- | :--- | :--- | :--- |
+| **Dropdown / Radio Title** | **30 characters** | Client screen crash / Validation error | Enforce `title.substring(0, 30)` or helper utility. |
+| **Description** | **200 characters** | Payload rejection | Enforce `desc.substring(0, 200)`. |
+| **List / Dropdown Items** | **200 items** | Payload size / UI freeze | Enforce `.slice(0, 200)`. |
+| **Payload Size** | **< 100 KB** | WhatsApp Flow failure | Exclude large images and unnecessary metadata. |
+| **SLA Latency** | **< 2500 ms** | Client timeout spinner | Use 2000ms timeouts on external HTTP requests. |
+
+---
+
+## 5. Pre-flight Verification Checklist
+
+Before publishing any WhatsApp Flow or Botmaker endpoint:
+1. [ ] Flow JSON declares `"version": "6.3"` and `"data_api_version": "3.0"`.
+2. [ ] All screens use `SingleColumnLayout` with a single top-level `Form`.
+3. [ ] All component properties use strict kebab-case.
+4. [ ] All dynamic data keys declare a valid `__example__`.
+5. [ ] Routing model has NO backward route cycles.
+6. [ ] Terminal screens declare `"terminal": true` and are NOT keys in `routing_model`.
+7. [ ] Botmaker endpoint URL uses the numerical `wabaId` (15–16 digits), NOT a phone number.
+8. [ ] Action Code handles `action === 'ping'` returning `{ status: 'active' }`.
+9. [ ] Action Code always concludes with `result.done()` in a `finally` block.
+10. [ ] Option titles are clamped to $\le$ 30 characters and lists capped at $\le$ 200 items.

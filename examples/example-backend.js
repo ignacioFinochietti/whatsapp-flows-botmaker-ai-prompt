@@ -1,60 +1,120 @@
 // ==============================================================================
-// 1. CONFIGURATION
+// 1. CONFIGURATION & HELPERS
 // ==============================================================================
-// NOTE: Ideally, credentials should be securely stored in Botmaker variables.
 const API_URL = "https://example.com/api";
 
-// ==============================================================================
-// 2. HELPER FUNCTIONS
-// ==============================================================================
+function cut(str, max) {
+    if (!str) return "";
+    return str.length > max ? str.substring(0, max) : str;
+}
+
 async function fetchDetails(id) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 2000); // 2000ms SLA timeout
+
     try {
-        const response = await fetch(`${API_URL}/details/${id}`);
+        const response = await fetch(`${API_URL}/details/${id}`, {
+            signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+
         if (!response.ok) throw new Error(`API Error: ${response.status}`);
-        return await response.json();
+        const resultData = await response.json();
+
+        // Enforce Meta Flow hard limits: <= 30 chars for titles, <= 200 items
+        const sanitizedOptions = (resultData.optionsList || [])
+            .slice(0, 200)
+            .map(opt => ({
+                id: String(opt.id),
+                title: cut(opt.title || opt.name, 30)
+            }));
+
+        return {
+            summary: cut(resultData.summary, 200),
+            optionsList: sanitizedOptions
+        };
     } catch (error) {
-        bmconsole.log(`[fetchDetails Error]: ${error.message}`);
+        clearTimeout(timeoutId);
+        if (typeof bmconsole !== "undefined" && bmconsole.log) {
+            bmconsole.log(`[fetchDetails Error]: ${error.message}`);
+        }
         return null;
     }
 }
 
 // ==============================================================================
-// 3. MAIN ENDPOINT LOGIC
+// 2. MAIN ENDPOINT LOGIC
 // ==============================================================================
 async function handleFlow() {
-    bmconsole.log('Incoming Payload from Flow: ', data);
+    const currentData = (typeof data !== "undefined" && data) ? data : {};
+    const action = currentData.action || currentData.component_action || null;
+
+    // Rule: Health-check ping (Required by Meta & Botmaker endpoint validation)
+    if (action === "ping") {
+        flow.data = { status: "active" };
+        flow.send();
+        return;
+    }
 
     // Rule: Context Access
-    const CHAT_DATA = await botmakerAPI.getChat();
-    const USER_TAG = CHAT_DATA?.variables?.user_tag || 'Standard';
+    // Prefer injected globals (user.get / user.set) over external API calls (botmakerAPI.getChat)
+    // to preserve WhatsApp's strict 2500ms SLA.
+    const userTag = (typeof user !== "undefined" && user.get)
+        ? (user.get("user_tag") || "Standard")
+        : "Standard";
 
     // Rule: Routing Pattern
-    if (data.component_action === "fetch_details") {
-        const detailsId = data.selectedId;
+    if (action === "fetch_details") {
+        const detailsId = currentData.selectedId;
         const detailsData = await fetchDetails(detailsId);
 
         // Rule: Required UI Fallbacks
-        if (!detailsData || detailsData.length === 0) {
-            bmconsole.log(`[WARNING] No details available for ID: ${detailsId}`);
+        if (!detailsData || !detailsData.optionsList || detailsData.optionsList.length === 0) {
+            if (typeof bmconsole !== "undefined" && bmconsole.log) {
+                bmconsole.log(`[WARNING] No details available for ID: ${detailsId}`);
+            }
             flow.data = {
                 showDynamicMessage: true,
                 dynamicMessage: "Sorry, no details are available at this time.",
-                dynamicOptions: [] // Clear the list
+                dynamicOptions: []
             };
         } else {
             flow.data = {
                 showDynamicMessage: true,
-                dynamicMessage: `Successfully loaded details: ${detailsData.summary}`,
+                dynamicMessage: `Loaded details for [${userTag}]: ${detailsData.summary}`,
                 dynamicOptions: detailsData.optionsList
             };
         }
     }
 
     // Rule: Data Exchange Response
-    // Always call flow.send() to gracefully terminate and push flow.data back to WhatsApp UI.
+    // Always call flow.send() to flush flow.data back to the WhatsApp UI.
     flow.send();
 }
 
-// Execute
-handleFlow()
-    .catch(err => bmconsole.log("Unhandled Exception: " + err.message));
+// ==============================================================================
+// 3. EXECUTION LIFECYCLE
+// ==============================================================================
+async function main() {
+    try {
+        await handleFlow();
+    } catch (error) {
+        if (typeof bmconsole !== "undefined" && bmconsole.log) {
+            bmconsole.log("[Unhandled Exception]: " + error.message);
+        }
+        if (typeof flow !== "undefined" && flow.send) {
+            flow.data = {
+                showDynamicMessage: true,
+                dynamicMessage: "An error occurred while processing your request."
+            };
+            flow.send();
+        }
+    } finally {
+        // CRITICAL: Botmaker VM sandbox requires result.done() to finalize execution
+        if (typeof result !== "undefined" && result && typeof result.done === "function") {
+            result.done();
+        }
+    }
+}
+
+main();
