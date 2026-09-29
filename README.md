@@ -12,7 +12,10 @@ This skill follows the universal **Agent Skills** specification and is compatibl
 ## Why do I need this?
 When using AI agents to generate Flow JSON files or Botmaker Action Code endpoints, models frequently produce fatal production bugs:
 - **Deprecated Flow versions**: Uses `1.0` or `3.1` (frozen by Meta), causing `"Flow JSON version is not supported"` rejections.
-- **Hanging Botmaker VM execution**: Omits `result.done()` in Action Code, leaving asynchronous execution sandboxes hanging until timeout.
+- **Bot code copied into a Flow endpoint**: Uses `user.get`, `rp` or `result`, which do not exist in the Botmaker WhatsApp Flow endpoint VM (`user is not defined`, `rp is not defined`).
+- **Dropped step key**: Sends the step in a payload key named `action`, which never reaches the endpoint. Use `component_action`.
+- **Flow closing on update**: Responds without `flow.nextScreen`, or resends only part of the screen data.
+- **Unreadable chat variables**: Calls `botmakerAPI.getChat()` without the access token (`unauthenticated (401)`).
 - **The "400 Decryption problem" trap**: Configures endpoint URLs using the phone number instead of the 15–16 digit numerical WABA ID.
 - **Missing Ping health-checks**: Fails automated Meta and Botmaker endpoint validation pings (`action === 'ping'`).
 - **Uncapped dynamic strings**: Exceeds Meta's strict **30-character limit on dropdown/radio titles**, crashing WhatsApp UI in runtime.
@@ -36,10 +39,14 @@ npx skills add ignacioFinochietti/whatsapp-flows-botmaker-ai-prompt
 1. Open [`/botmaker-whatsapp-flows/SKILL.md`](botmaker-whatsapp-flows/SKILL.md).
 2. Copy the contents into your agent's system prompt or custom instructions.
 
-## Included Examples
-Inside [`/examples`](examples):
-- [`example-frontend.json`](examples/example-frontend.json): Production-grade WhatsApp Flow JSON (v6.3 / 3.0) with reactive dynamic visibility and valid DAG routing.
-- [`example-backend.js`](examples/example-backend.js): Botmaker Action Code JS endpoint implementing health-check pings, SLA timeouts, 30-char clamping, and `result.done()` lifecycle termination.
+## Included Files
+Inside [`/botmaker-whatsapp-flows`](botmaker-whatsapp-flows):
+- [`SKILL.md`](botmaker-whatsapp-flows/SKILL.md): Runtime contract loaded by the agent.
+- [`references/flow-json-rules.md`](botmaker-whatsapp-flows/references/flow-json-rules.md): Flow JSON schema, UX, DAG routing and hard limits.
+- [`references/botmaker-endpoint-runtime.md`](botmaker-whatsapp-flows/references/botmaker-endpoint-runtime.md): Globals available in the Botmaker Flow endpoint VM (verified in production logs), payload quirks, `botmakerAPI`, latency and security rules.
+- [`references/botmaker-rest-api.md`](botmaker-whatsapp-flows/references/botmaker-rest-api.md): Botmaker REST API v2.0 authentication and chat/variable operations.
+- [`examples/example-frontend.json`](botmaker-whatsapp-flows/examples/example-frontend.json): Flow JSON (v6.3 / 3.0) with reactive dynamic visibility and valid DAG routing.
+- [`examples/example-backend.js`](botmaker-whatsapp-flows/examples/example-backend.js): Flow endpoint using `fetch` with timeouts, `botmakerAPI.getChat(accessToken)`, `component_action` routing with screen fallback, and diagnostic logs without personal data.
 
 ## License
 MIT License
