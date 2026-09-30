@@ -1,120 +1,143 @@
 // ==============================================================================
-// 1. CONFIGURATION & HELPERS
+// Botmaker WhatsApp Flow endpoint (data_exchange) - verified runtime pattern.
+//
+// Available globals in the Flow endpoint VM: flow (data, nextScreen, send), data,
+// screen, bmconsole, botmakerAPI (getChat, updateChat), fetch, AbortController.
+// NOT available: user, rp, result, context. See references/botmaker-endpoint-runtime.md.
 // ==============================================================================
-const API_URL = "https://example.com/api";
 
-function cut(str, max) {
-    if (!str) return "";
-    return str.length > max ? str.substring(0, max) : str;
+// Paste the Botmaker API access token inside Botmaker only. Never commit it.
+const BOTMAKER_ACCESS_TOKEN = 'PEGAR_ACCESS_TOKEN_EN_BOTMAKER';
+const API_URL = 'https://example.com/api';
+const HTTP_TIMEOUT_MS = 1200;
+
+function log(message) {
+  if (typeof bmconsole !== 'undefined' && bmconsole.log) bmconsole.log(message);
 }
 
-async function fetchDetails(id) {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 2000); // 2000ms SLA timeout
+function cut(value, max) {
+  const s = value == null ? '' : String(value);
+  return s.length > max ? s.substring(0, max) : s;
+}
 
-    try {
-        const response = await fetch(`${API_URL}/details/${id}`, {
-            signal: controller.signal
-        });
-        clearTimeout(timeoutId);
-
-        if (!response.ok) throw new Error(`API Error: ${response.status}`);
-        const resultData = await response.json();
-
-        // Enforce Meta Flow hard limits: <= 30 chars for titles, <= 200 items
-        const sanitizedOptions = (resultData.optionsList || [])
-            .slice(0, 200)
-            .map(opt => ({
-                id: String(opt.id),
-                title: cut(opt.title || opt.name, 30)
-            }));
-
-        return {
-            summary: cut(resultData.summary, 200),
-            optionsList: sanitizedOptions
-        };
-    } catch (error) {
-        clearTimeout(timeoutId);
-        if (typeof bmconsole !== "undefined" && bmconsole.log) {
-            bmconsole.log(`[fetchDetails Error]: ${error.message}`);
-        }
-        return null;
+// fetch with timeout. err.error keeps the parsed body (rp-compatible).
+async function http({ uri, method = 'GET', qs, headers = {}, body, json = true, timeout = HTTP_TIMEOUT_MS }) {
+  const url = new URL(uri);
+  Object.entries(qs || {}).forEach(([k, v]) => url.searchParams.set(k, String(v)));
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
+  try {
+    const response = await fetch(url.toString(), {
+      method,
+      headers: body !== undefined && json ? Object.assign({ 'Content-Type': 'application/json' }, headers) : headers,
+      body: body !== undefined ? (json ? JSON.stringify(body) : body) : undefined,
+      signal: controller.signal
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      const err = new Error(`HTTP ${response.status}`);
+      err.statusCode = response.status;
+      try { err.error = JSON.parse(text); } catch (e) { err.error = text; }
+      throw err;
     }
+    return json ? (text ? JSON.parse(text) : null) : text;
+  } catch (err) {
+    if (err.name === 'AbortError') throw new Error(`Timeout after ${timeout} ms`);
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
-// ==============================================================================
-// 2. MAIN ENDPOINT LOGIC
-// ==============================================================================
+// Chat variables of the person using the flow, read once per execution.
+let chatVariablesPromise = null;
+function getChatVariables() {
+  if (!chatVariablesPromise) {
+    chatVariablesPromise = (async () => {
+      if (typeof botmakerAPI === 'undefined' || typeof botmakerAPI.getChat !== 'function') return {};
+      try {
+        const chat = await botmakerAPI.getChat(BOTMAKER_ACCESS_TOKEN);
+        return (chat && chat.variables) || {};
+      } catch (err) {
+        log(`[getChat] ${err.message}`);
+        return {};
+      }
+    })();
+  }
+  return chatVariablesPromise;
+}
+
+// ---------- Handlers: always return EVERY field the target screen binds ----------
+async function loadOptions(d) {
+  const vars = await getChatVariables();
+  let options = [];
+  try {
+    const result = await http({ uri: `${API_URL}/options`, qs: { branch: vars.branchId, q: d.query } });
+    options = (result.items || []).slice(0, 200).map(o => ({ id: String(o.id), title: cut(o.name, 30) }));
+  } catch (err) {
+    log(`[loadOptions] ${err.message}`);
+  }
+  flow.data = {
+    options,
+    show_options: options.length > 0,
+    show_error: options.length === 0,
+    error_msg: options.length ? ' ' : 'No hay opciones disponibles en este momento.'
+  };
+  // Same screen: in-place update (nextScreen already set by the router).
+}
+
+// ---------- Router ----------
+// "action" never reaches the endpoint: the Flow JSON sends "component_action".
+function inferAction(currentScreen, d) {
+  if (currentScreen === 'MAIN_SCREEN') return 'load_options';
+  return null;
+}
+
 async function handleFlow() {
-    const currentData = (typeof data !== "undefined" && data) ? data : {};
-    const action = currentData.action || currentData.component_action || null;
+  const currentScreen = typeof screen !== 'undefined' ? screen : null;
+  const d = (typeof data !== 'undefined' && data) ? data : {};
+  let action = d.component_action || d.action || null;
+  const startedAt = Date.now();
+  // Keys only, never values (personal data).
+  log(`[Flow] screen=${currentScreen} action=${action} keys=${Object.keys(d).join(',')}`);
 
-    // Rule: Health-check ping (Required by Meta & Botmaker endpoint validation)
-    if (action === "ping") {
-        flow.data = { status: "active" };
-        flow.send();
-        return;
-    }
-
-    // Rule: Context Access
-    // Prefer injected globals (user.get / user.set) over external API calls (botmakerAPI.getChat)
-    // to preserve WhatsApp's strict 2500ms SLA.
-    const userTag = (typeof user !== "undefined" && user.get)
-        ? (user.get("user_tag") || "Standard")
-        : "Standard";
-
-    // Rule: Routing Pattern
-    if (action === "fetch_details") {
-        const detailsId = currentData.selectedId;
-        const detailsData = await fetchDetails(detailsId);
-
-        // Rule: Required UI Fallbacks
-        if (!detailsData || !detailsData.optionsList || detailsData.optionsList.length === 0) {
-            if (typeof bmconsole !== "undefined" && bmconsole.log) {
-                bmconsole.log(`[WARNING] No details available for ID: ${detailsId}`);
-            }
-            flow.data = {
-                showDynamicMessage: true,
-                dynamicMessage: "Sorry, no details are available at this time.",
-                dynamicOptions: []
-            };
-        } else {
-            flow.data = {
-                showDynamicMessage: true,
-                dynamicMessage: `Loaded details for [${userTag}]: ${detailsData.summary}`,
-                dynamicOptions: detailsData.optionsList
-            };
-        }
-    }
-
-    // Rule: Data Exchange Response
-    // Always call flow.send() to flush flow.data back to the WhatsApp UI.
+  if (action === 'ping') {
+    flow.data = { status: 'active' };
     flow.send();
+    return;
+  }
+  if (!action && currentScreen) action = inferAction(currentScreen, d);
+
+  // Every response needs a screen. Forward handlers overwrite it.
+  if (currentScreen) flow.nextScreen = currentScreen;
+
+  if (!currentScreen || action === 'INIT') {
+    flow.data = { options: [], show_options: false, show_error: false, error_msg: ' ' };
+    flow.nextScreen = 'MAIN_SCREEN';
+  } else if (action === 'load_options') {
+    await loadOptions(d);
+  } else {
+    log(`[Flow] Unknown action "${action}" on screen ${currentScreen}`);
+    flow.data = { show_error: true, error_msg: 'Ocurrió un error inesperado. Por favor, intente nuevamente.' };
+  }
+
+  log(`[Flow] done action=${action} ms=${Date.now() - startedAt}`);
+  flow.send();
 }
 
-// ==============================================================================
-// 3. EXECUTION LIFECYCLE
-// ==============================================================================
 async function main() {
-    try {
-        await handleFlow();
-    } catch (error) {
-        if (typeof bmconsole !== "undefined" && bmconsole.log) {
-            bmconsole.log("[Unhandled Exception]: " + error.message);
-        }
-        if (typeof flow !== "undefined" && flow.send) {
-            flow.data = {
-                showDynamicMessage: true,
-                dynamicMessage: "An error occurred while processing your request."
-            };
-            flow.send();
-        }
-    } finally {
-        // CRITICAL: Botmaker VM sandbox requires result.done() to finalize execution
-        if (typeof result !== "undefined" && result && typeof result.done === "function") {
-            result.done();
-        }
+  try {
+    await handleFlow();
+  } catch (error) {
+    log('[Flow Error]: ' + error.message);
+    if (typeof flow !== 'undefined' && flow.send) {
+      flow.data = { show_error: true, error_msg: 'Ocurrió un error inesperado. Por favor, intente nuevamente.' };
+      flow.send();
     }
+  } finally {
+    // `result` does not exist in the Flow endpoint VM; keep the guard for bot-action reuse.
+    if (typeof result !== 'undefined' && result && typeof result.done === 'function') result.done();
+  }
 }
 
 main();
